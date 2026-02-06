@@ -226,11 +226,11 @@ async function main() {
                     console.log('💡 Mode: Auto (0)');
                     setMode(0);
                 } else if (pathname === '/low') {
-                    console.log('💡 Mode: Low (1)');
-                    setMode(1);
-                } else if (pathname === '/medium') {
-                    console.log('💡 Mode: Medium (17)');
+                    console.log('💡 Mode: Low (17)');
                     setMode(17);
+                } else if (pathname === '/medium') {
+                    console.log('💡 Mode: Medium (1)');
+                    setMode(1);
                 } else if (pathname === '/high') {
                     console.log('💡 Mode: High (18)');
                     setMode(18);
