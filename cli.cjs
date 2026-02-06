@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const mqtt = require('mqtt');
+const http = require('http'); // Added for web server
 
 // Helper to de-obfuscate
 const _mj = (arr) => arr.map(c => String.fromCharCode(c ^ 0x55)).join('');
@@ -17,7 +18,8 @@ const CONFIG = {
     tokenUrl: 'https://cdc.accounts.home.id/oidc/op/v1.0/4_JGZWlP8eQHpEqkvQElolbA/oauth/token',
     apiBase: 'https://prod.eu-da.iot.versuni.com/api/da',
     userAgent: 'Air (com.philips.ph.homecare; build:3.16.1; locale:en_US; Android:12 Sdk:2.2.0) okhttp/4.12.0',
-    tokenFile: path.join(__dirname, 'philips_tokens.json')
+    tokenFile: path.join(__dirname, 'philips_tokens.json'),
+    serverPort: 3000 // Port for the web interface
 };
 
 // --- Helpers ---
@@ -103,7 +105,8 @@ async function login() {
         scope: CONFIG.scope
     });
 
-    console.log('\n👉 Open this URL to login:', `${CONFIG.authUrl}?${params.toString()}\n`);
+    console.log('\n👉 Open this URL in your browser to login:');
+    console.log(`${CONFIG.authUrl}?${params.toString()}\n`);
 
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -221,18 +224,61 @@ async function main() {
 
             const shadowTopic = `$aws/things/${myDevice.thingName}/shadow/update`;
             const acceptedTopic = `${shadowTopic}/accepted`;
-
-            client.subscribe([acceptedTopic], (err) => {
-                if (!err) console.log(`📡 Subscribed to shadow updates`);
+            
+            client.subscribe(acceptedTopic, (err) => {
+                if (!err) console.log(`📡 Subscribed to: ${acceptedTopic}`);
             });
 
-            // Toggle logic
-            setTimeout(() => {
-                console.log('💡 Sending Power Command...');
-                client.publish(shadowTopic, JSON.stringify({
-                    state: { desired: { powerOn: false } }
-                }));
-            }, 2000);
+            // --- START WEB SERVER ---
+            const server = http.createServer((req, res) => {
+                // Parse URL to handle potential query params if needed later
+                const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+                const pathname = reqUrl.pathname;
+
+                console.log(`🌐 Web Request: ${pathname}`);
+
+                if (pathname === '/') {
+                    // Simple HTML Interface
+                    res.writeHead(200, { 'Content-Type': 'text/html' });
+                    res.end(`
+                        <!DOCTYPE html>
+                        <html style="font-family: sans-serif; text-align: center; padding: 50px;">
+                        <head><title>Air Purifier</title></head>
+                        <body>
+                            <h1>${myDevice.friendlyName}</h1>
+                            <div style="display: flex; gap: 20px; justify-content: center;">
+                                <a href="/on" style="padding: 20px 40px; background: #4CAF50; color: white; text-decoration: none; border-radius: 8px; font-size: 24px;">Turn ON</a>
+                                <a href="/off" style="padding: 20px 40px; background: #f44336; color: white; text-decoration: none; border-radius: 8px; font-size: 24px;">Turn OFF</a>
+                            </div>
+                        </body>
+                        </html>
+                    `);
+                } 
+                else if (pathname === '/on') {
+                    console.log('💡 Web Command: Power ON');
+                    client.publish(shadowTopic, JSON.stringify({
+                        state: { desired: { powerOn: true } }
+                    }));
+                    res.writeHead(204); // No Content (browser stays on page or just executes)
+                    res.end();
+                } 
+                else if (pathname === '/off') {
+                    console.log('💡 Web Command: Power OFF');
+                    client.publish(shadowTopic, JSON.stringify({
+                        state: { desired: { powerOn: false } }
+                    }));
+                    res.writeHead(204);
+                    res.end();
+                } 
+                else {
+                    res.writeHead(404);
+                    res.end('Not Found');
+                }
+            });
+
+            server.listen(CONFIG.serverPort, () => {
+                console.log(`\n✨ Web Controller running at: http://localhost:${CONFIG.serverPort}`);
+            });
         });
 
         client.on('message', (topic, message) => {
