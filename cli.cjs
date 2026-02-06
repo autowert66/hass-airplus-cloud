@@ -17,6 +17,7 @@ const CONFIG = {
     authUrl: 'https://cdc.accounts.home.id/oidc/op/v1.0/4_JGZWlP8eQHpEqkvQElolbA/authorize',
     tokenUrl: 'https://cdc.accounts.home.id/oidc/op/v1.0/4_JGZWlP8eQHpEqkvQElolbA/oauth/token',
     apiBase: 'https://prod.eu-da.iot.versuni.com/api/da',
+    // Matches the User-Agent from your HAR capture 
     userAgent: 'Air (com.philips.ph.homecare; build:3.16.1; locale:en_US; Android:12 Sdk:2.2.0) okhttp/4.12.0',
     tokenFile: path.join(__dirname, 'philips_tokens.json'),
     serverPort: 3000 // Port for the web interface
@@ -24,7 +25,10 @@ const CONFIG = {
 
 // --- Helpers ---
 function base64URLEncode(str) {
-    return str.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    return str.toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '');
 }
 
 function generateVerifier() {
@@ -41,9 +45,10 @@ function uuidv4() {
 
 // --- Token Management ---
 function saveTokens(tokens) {
+    // Calculate exact expiry time (current time + expires_in seconds)
     tokens.expires_at = Date.now() + (tokens.expires_in * 1000);
     fs.writeFileSync(CONFIG.tokenFile, JSON.stringify(tokens, null, 2));
-    console.log('✅ Tokens (Access + ID) saved to disk.');
+    console.log('✅ Tokens saved to disk.');
 }
 
 function loadTokens() {
@@ -53,23 +58,26 @@ function loadTokens() {
     return null;
 }
 
-// --- API Client ---
+// --- API Client (Native Fetch) ---
 async function apiCall(endpoint, method = 'GET', token, body = null, useBearer = true) {
     const headers = {
         'User-Agent': CONFIG.userAgent,
         'Content-Type': 'application/json'
     };
-
-    if (useBearer && token) {
-        headers['Authorization'] = `Bearer ${token}`;
+    
+    if(useBearer && token) {
+       headers['Authorization'] = `Bearer ${token}`;
     }
 
     const options = { method, headers };
-    if (body) options.body = JSON.stringify(body);
+
+    if (body) {
+        options.body = JSON.stringify(body);
+    }
 
     const response = await fetch(`${CONFIG.apiBase}${endpoint}`, options);
     if (!response.ok) {
-        throw new Error(`API Error ${response.status} on ${endpoint}: ${await response.text()}`);
+        throw new Error(`API Error ${response.status}: ${await response.text()}`);
     }
     return await response.json();
 }
@@ -78,10 +86,11 @@ async function apiCall(endpoint, method = 'GET', token, body = null, useBearer =
 async function login() {
     let tokens = loadTokens();
 
+    // 1. Check if we have valid tokens
     if (tokens) {
-        if (Date.now() < tokens.expires_at - 60000) {
-            console.log('🔹 Using existing valid tokens.');
-            return tokens; // Return full object (access_token + id_token)
+        if (Date.now() < tokens.expires_at - 60000) { // Buffer of 1 minute
+            console.log('🔹 Using existing valid token.');
+            return tokens;
         } else {
             console.log('🔸 Token expired. Refreshing...');
             try {
@@ -92,9 +101,10 @@ async function login() {
         }
     }
 
-    // Full PKCE Login
+    // 2. Full PKCE Login Flow
     const verifier = generateVerifier();
     const challenge = generateChallenge(verifier);
+
     const params = new URLSearchParams({
         client_id: CONFIG.clientId,
         code_challenge: challenge,
@@ -109,15 +119,17 @@ async function login() {
     console.log(`${CONFIG.authUrl}?${params.toString()}\n`);
 
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
+    
     return new Promise((resolve) => {
-        rl.question('Paste redirect URL: ', async (pastedUrl) => {
+        rl.question('Paste the full redirect URL (starting with com.philips.air://...): ', async (pastedUrl) => {
             rl.close();
+            
             try {
-                const cleanUrl = pastedUrl.trim().replace(/'/g, '').replace(/"/g, '');
-                const parsedUrl = new URL(cleanUrl.replace('com.philips.air://', 'http://dummy/'));
+                const cleanUrl = pastedUrl.trim().replace(/'/g, '').replace(/"/g, ''); 
+                const parsedUrl = new URL(cleanUrl.replace('com.philips.air://', 'http://dummy/')); 
                 const code = parsedUrl.searchParams.get('code');
-                if (!code) throw new Error('No code found');
+
+                if (!code) throw new Error('No code found in URL');
 
                 const response = await fetch(CONFIG.tokenUrl, {
                     method: 'POST',
@@ -133,10 +145,11 @@ async function login() {
                 });
 
                 const data = await response.json();
-                if (data.error) throw new Error(data.error);
+                if (data.error) throw new Error(data.error_description || data.error);
 
                 saveTokens(data);
                 resolve(data);
+
             } catch (error) {
                 console.error('❌ Login failed:', error.message);
                 process.exit(1);
@@ -156,8 +169,10 @@ async function refreshToken(refreshToken) {
             refresh_token: refreshToken
         })
     });
+
     const data = await response.json();
-    if (data.error) throw new Error(data.error);
+    if (data.error) throw new Error(data.error_description || data.error);
+
     saveTokens(data);
     return data;
 }
@@ -165,17 +180,14 @@ async function refreshToken(refreshToken) {
 // --- Main Logic ---
 async function main() {
     try {
-        // 1. Authenticate (Get both tokens)
+        // 1. Authenticate
         const tokens = await login();
         const accessToken = tokens.access_token;
         const idToken = tokens.id_token;
 
-        if (!idToken) {
-            throw new Error("❌ ID Token missing. Please delete philips_tokens.json and login again.");
-        }
+        if (!idToken) throw new Error("❌ ID Token missing. Delete philips_tokens.json and login again.");
 
-        // 2. Fetch User ID for ClientId construction
-        // Request 240 in HAR: Uses idToken in body, NO Bearer header
+        // 2. Fetch User ID
         console.log('🔹 Fetching User ID...');
         const userRes = await apiCall('/user/self/get-id', 'POST', null, { idToken: idToken }, false);
         const userId = userRes.userId;
@@ -184,30 +196,37 @@ async function main() {
         // 3. Get Device Info
         console.log('🔹 Fetching devices...');
         const devices = await apiCall('/user/self/device', 'GET', accessToken);
-        const myDevice = devices[0];
+        const myDevice = devices[0]; 
+        
+        if (!myDevice) {
+            console.error('❌ No devices found on this account.');
+            return;
+        }
+        
         console.log(`✅ Found device: ${myDevice.friendlyName} (${myDevice.thingName})`);
 
         // 4. Get AWS Signature
         console.log('🔹 Getting AWS Signature...');
         const sigData = await apiCall('/user/self/signature', 'GET', accessToken);
-        const signature = sigData.signature;
+        const signature = sigData.signature; 
         console.log('✅ Signature obtained.');
 
-        // 5. Connect to AWS IoT
+        // 5. Connect to MQTT
         console.log('🔹 Connecting to AWS IoT...');
-
-        // FIX: Construct the specific Client ID format: I<userId>_<randomUUID>
+        
+        const wsUrl = 'wss://ats.prod.eu-da.iot.versuni.com/mqtt';
+        
+        // Correct Client ID format: <userId>_<uuid>
         const clientId = `${userId}_${uuidv4()}`;
-        console.log(`🔹 Using Client ID: ${clientId}`);
+        console.log(`🔹 Client ID: ${clientId}`);
 
-        const client = mqtt.connect('wss://ats.prod.eu-da.iot.versuni.com/mqtt', {
+        const client = mqtt.connect(wsUrl, {
             clientId: clientId,
             protocolId: 'MQTT',
             protocolVersion: 4,
             clean: true,
             keepalive: 30,
             reconnectPeriod: 5000,
-
             wsOptions: {
                 headers: {
                     'token-header': `Bearer ${accessToken}`,
@@ -221,7 +240,7 @@ async function main() {
 
         client.on('connect', () => {
             console.log('🚀 MQTT Connected!');
-
+            
             const shadowTopic = `$aws/things/${myDevice.thingName}/shadow/update`;
             const acceptedTopic = `${shadowTopic}/accepted`;
             
@@ -282,12 +301,16 @@ async function main() {
         });
 
         client.on('message', (topic, message) => {
-            console.log(`📩 [${topic}]: ${message.toString()}`);
+            console.log(`📩 MQTT Message: ${message.toString()}`);
         });
 
-        client.on('error', (err) => console.error('❌ MQTT Error:', err.message));
-        client.on('offline', () => console.log('🔸 MQTT Offline'));
-        client.on('close', () => console.log('🔸 MQTT Connection Closed'));
+        client.on('error', (err) => {
+            console.error('❌ MQTT Error:', err);
+        });
+
+        client.on('close', () => {
+             console.log('🔸 MQTT Connection Closed');
+        });
 
     } catch (error) {
         console.error('❌ Application Error:', error);
