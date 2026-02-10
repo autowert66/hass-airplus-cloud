@@ -1,6 +1,7 @@
 """Fan platform for Philips Air+ integration."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -29,10 +30,7 @@ async def async_setup_entry(
     api = hass.data[DOMAIN][config_entry.entry_id]
     thing_name = config_entry.data[CONF_THING_NAME]
     
-    # Get fresh signature
-    signature = await api.get_signature()
-    
-    fan = PhilipsAirPlusFan(api, thing_name, signature, config_entry.title)
+    fan = PhilipsAirPlusFan(api, thing_name, config_entry.title)
     async_add_entities([fan])
 
 class PhilipsAirPlusFan(FanEntity):
@@ -42,10 +40,9 @@ class PhilipsAirPlusFan(FanEntity):
     _attr_supported_features = FanEntityFeature.PRESET_MODE | FanEntityFeature.TURN_ON | FanEntityFeature.TURN_OFF
     _attr_preset_modes = PRESET_MODES
 
-    def __init__(self, api, thing_name, signature, name):
+    def __init__(self, api, thing_name, name):
         self._api = api
         self._thing_name = thing_name
-        self._signature = signature
         self._attr_name = name
         self._attr_unique_id = f"{thing_name}_fan"
         
@@ -55,29 +52,57 @@ class PhilipsAirPlusFan(FanEntity):
         
         self._shadow_topic = f"$aws/things/{thing_name}/shadow/update"
         self._ncp_topic = f"da_ctrl/{thing_name}/to_ncp"
+        self._reconnect_task = None
+        self._should_reconnect = True
 
     async def async_added_to_hass(self) -> None:
         """Handle being added to Home Assistant."""
-        await self._connect_mqtt()
+        self._should_reconnect = True
+        self._reconnect_task = asyncio.create_task(self._mqtt_loop())
 
-    async def _connect_mqtt(self):
-        client_id = f"{self._api.user_id}_{uuid.uuid4()}"
-        
-        self._mqtt_client = mqtt.Client(client_id=client_id, transport="websockets")
-        self._mqtt_client.ws_set_options(headers={
-            'token-header': f"Bearer {self._api.access_token}",
-            'x-amz-customauthorizer-signature': self._signature,
-            'x-amz-customauthorizer-name': 'CustomAuthorizer',
-            'tenant': 'da'
-        })
-        self._mqtt_client.tls_set()
-        
-        self._mqtt_client.on_connect = self._on_connect
-        self._mqtt_client.on_message = self._on_message
-        
-        # Connect in a separate thread to not block HA
-        self._mqtt_client.connect_async("ats.prod.eu-da.iot.versuni.com", 443, keepalive=30)
-        self._mqtt_client.loop_start()
+    async def _mqtt_loop(self):
+        """Main MQTT connection loop with reconnection logic."""
+        retry_delay = 5
+        while self._should_reconnect:
+            try:
+                _LOGGER.debug("Attempting to connect to Philips Air+ MQTT...")
+                
+                # Refresh tokens and get fresh signature before connecting
+                signature = await self._api.get_signature()
+                
+                client_id = f"{self._api.user_id}_{uuid.uuid4()}"
+                self._mqtt_client = mqtt.Client(client_id=client_id, transport="websockets")
+                self._mqtt_client.ws_set_options(headers={
+                    'token-header': f"Bearer {self._api.access_token}",
+                    'x-amz-customauthorizer-signature': signature,
+                    'x-amz-customauthorizer-name': 'CustomAuthorizer',
+                    'tenant': 'da'
+                })
+                self._mqtt_client.tls_set()
+                
+                self._mqtt_client.on_connect = self._on_connect
+                self._mqtt_client.on_message = self._on_message
+                self._mqtt_client.on_disconnect = self._on_disconnect
+                
+                # Connect
+                self._mqtt_client.connect("ats.prod.eu-da.iot.versuni.com", 443, keepalive=30)
+                
+                # Start loop and wait until disconnect or stop
+                self._mqtt_client.loop_start()
+                
+                # Monitor connection - if loop_start is running, we just wait
+                while self._mqtt_client.is_connected():
+                    await asyncio.sleep(1)
+                    retry_delay = 5 # Reset delay on successful connection
+                
+                self._mqtt_client.loop_stop()
+                
+            except Exception as e:
+                _LOGGER.error("MQTT connection error: %s. Retrying in %ds...", str(e), retry_delay)
+            
+            if self._should_reconnect:
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300) # Exponential backoff up to 5 mins
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -86,6 +111,9 @@ class PhilipsAirPlusFan(FanEntity):
         else:
             _LOGGER.error("Failed to connect to Philips Air+ MQTT, rc: %d", rc)
 
+    def _on_disconnect(self, client, userdata, rc):
+        _LOGGER.warning("Disconnected from Philips Air+ MQTT, rc: %d", rc)
+
     def _on_message(self, client, userdata, msg):
         try:
             payload = json.loads(msg.payload)
@@ -93,9 +121,8 @@ class PhilipsAirPlusFan(FanEntity):
             if "powerOn" in state:
                 self._is_on = state["powerOn"]
             
-            # Note: The CLI uses D0310C for mode, we might need to find where it's reported
-            # For now, we update the UI based on what we know
-            self.async_write_ha_state()
+            # Update UI
+            self.hass.add_job(self.async_write_ha_state)
         except Exception:
             _LOGGER.exception("Error handling MQTT message")
 
@@ -110,20 +137,26 @@ class PhilipsAirPlusFan(FanEntity):
     async def async_turn_on(self, percentage: int | None = None, preset_mode: str | None = None, **kwargs: Any) -> None:
         """Turn on the fan."""
         payload = {"state": {"desired": {"powerOn": True}}}
-        self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
-        self._is_on = True
-        
-        if preset_mode:
-            await self.async_set_preset_mode(preset_mode)
-        
-        self.async_write_ha_state()
+        if self._mqtt_client and self._mqtt_client.is_connected():
+            self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
+            self._is_on = True
+            
+            if preset_mode:
+                await self.async_set_preset_mode(preset_mode)
+            
+            self.async_write_ha_state()
+        else:
+            _LOGGER.error("Cannot turn on: MQTT client not connected")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the fan."""
         payload = {"state": {"desired": {"powerOn": False}}}
-        self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
-        self._is_on = False
-        self.async_write_ha_state()
+        if self._mqtt_client and self._mqtt_client.is_connected():
+            self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
+            self._is_on = False
+            self.async_write_ha_state()
+        else:
+            _LOGGER.error("Cannot turn off: MQTT client not connected")
 
     async def async_set_preset_mode(self, preset_mode: str):
         if preset_mode not in MODE_TO_VALUE:
@@ -145,12 +178,18 @@ class PhilipsAirPlusFan(FanEntity):
                 }
             }
         }
-        self._mqtt_client.publish(self._ncp_topic, json.dumps(payload))
-        self._preset_mode = preset_mode
-        self.async_write_ha_state()
+        if self._mqtt_client and self._mqtt_client.is_connected():
+            self._mqtt_client.publish(self._ncp_topic, json.dumps(payload))
+            self._preset_mode = preset_mode
+            self.async_write_ha_state()
+        else:
+            _LOGGER.error("Cannot set preset mode: MQTT client not connected")
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle being removed from Home Assistant."""
+        self._should_reconnect = False
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
         if self._mqtt_client:
             self._mqtt_client.loop_stop()
             self._mqtt_client.disconnect()

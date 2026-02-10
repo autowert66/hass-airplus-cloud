@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import PhilipsAirPlusAPI
@@ -20,7 +20,21 @@ PLATFORMS: list[Platform] = [Platform.FAN]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Philips Air+ from a config entry."""
     session = async_get_clientsession(hass)
-    api = PhilipsAirPlusAPI(session)
+    
+    @callback
+    def update_entry_data(tokens: dict):
+        """Update config entry data with new tokens."""
+        new_data = {**entry.data}
+        new_data.update({
+            CONF_ACCESS_TOKEN: tokens.get("access_token"),
+            CONF_REFRESH_TOKEN: tokens.get("refresh_token"),
+            CONF_ID_TOKEN: tokens.get("id_token"),
+            CONF_EXPIRES_AT: tokens.get("expires_at"),
+        })
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.debug("Philips Air+ tokens updated and persisted")
+
+    api = PhilipsAirPlusAPI(session, on_token_update=update_entry_data)
     
     api.access_token = entry.data.get(CONF_ACCESS_TOKEN)
     api.refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
