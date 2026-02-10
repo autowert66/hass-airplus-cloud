@@ -1,5 +1,7 @@
 # Philips Air+ Home Assistant Integration
 
+[![hacs_badge](https://my.home-assistant.io/badges/hacs_badge.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=autowert66&repository=hass-airplus-cloud&category=integration)
+
 This integration allows you to control Philips Air+ air purifiers through Home Assistant.
 
 ## Features

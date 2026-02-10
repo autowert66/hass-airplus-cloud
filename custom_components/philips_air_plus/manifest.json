@@ -1,10 +1,11 @@
 {
   "domain": "philips_air_plus",
   "name": "Philips Air+",
-  "codeowners": [],
+  "codeowners": ["@autowert66"],
+  "issue_tracker": "https://github.com/autowert66/hass-airplus-cloud/issues",
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/manus/philips_air_plus",
+  "documentation": "https://github.com/autowert66/hass-airplus-cloud",
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "loggers": ["custom_components.philips_air_plus"],
