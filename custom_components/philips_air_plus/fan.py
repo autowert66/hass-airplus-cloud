@@ -107,13 +107,19 @@ class PhilipsAirPlusFan(FanEntity):
     def preset_mode(self) -> str | None:
         return self._preset_mode
 
-    async def async_turn_on(self, **kwargs):
+    async def async_turn_on(self, percentage: int | None = None, preset_mode: str | None = None, **kwargs: Any) -> None:
+        """Turn on the fan."""
         payload = {"state": {"desired": {"powerOn": True}}}
         self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
         self._is_on = True
+        
+        if preset_mode:
+            await self.async_set_preset_mode(preset_mode)
+        
         self.async_write_ha_state()
 
-    async def async_turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off the fan."""
         payload = {"state": {"desired": {"powerOn": False}}}
         self._mqtt_client.publish(self._shadow_topic, json.dumps(payload))
         self._is_on = False
