@@ -48,8 +48,10 @@ class PhilipsAirPlusAPI:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error("Failed to get tokens: %s", text)
-                raise Exception(f"Token error: {resp.status}")
+                raise Exception(f"Token error: {resp.status} - {text}")
             tokens = await resp.json()
+            # Add expires_at calculation here
+            tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
             self._update_tokens(tokens)
             return tokens
 
@@ -64,8 +66,9 @@ class PhilipsAirPlusAPI:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error("Failed to refresh tokens: %s", text)
-                raise Exception(f"Refresh error: {resp.status}")
+                raise Exception(f"Refresh error: {resp.status} - {text}")
             tokens = await resp.json()
+            tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
             self._update_tokens(tokens)
             return tokens
 
@@ -73,7 +76,7 @@ class PhilipsAirPlusAPI:
         self.access_token = tokens.get("access_token")
         self.refresh_token = tokens.get("refresh_token")
         self.id_token = tokens.get("id_token")
-        self.expires_at = time.time() + tokens.get("expires_in", 3600)
+        self.expires_at = tokens.get("expires_at")
 
     async def get_user_id(self) -> str:
         headers = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
@@ -99,4 +102,3 @@ class PhilipsAirPlusAPI:
         async with self.session.get(f"{API_BASE}/user/self/signature", headers=headers) as resp:
             data = await resp.json()
             return data.get("signature")
-
