@@ -1,0 +1,13 @@
+{
+  "domain": "philips_air_plus",
+  "name": "Philips Air+",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/manus/philips_air_plus",
+  "integration_type": "hub",
+  "iot_class": "cloud_push",
+  "loggers": ["custom_components.philips_air_plus"],
+  "requirements": ["paho-mqtt>=2.1.0"],
+  "version": "1.0.0"
+}
