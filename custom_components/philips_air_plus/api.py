@@ -38,7 +38,8 @@ class PhilipsAirPlusAPI:
 
     async def ensure_valid_token(self):
         """Ensure the access token is valid, refreshing if necessary."""
-        if time.time() >= self.expires_at - 60:  # Refresh 1 minute before expiry
+        # Refresh if token is expired or expiring within 5 minutes to be safe
+        if time.time() >= self.expires_at - 300:
             _LOGGER.debug("Token expired or expiring soon, refreshing...")
             await self.refresh_tokens()
 
@@ -105,11 +106,16 @@ class PhilipsAirPlusAPI:
             return await resp.json()
 
     async def get_signature(self) -> str:
+        # Crucial: Always ensure token is valid before fetching signature
         await self.ensure_valid_token()
         headers = {
             "User-Agent": USER_AGENT,
             "Authorization": f"Bearer {self.access_token}"
         }
         async with self.session.get(f"{API_BASE}/user/self/signature", headers=headers) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                _LOGGER.error("Failed to get signature: %s", text)
+                raise Exception(f"Signature error: {resp.status}")
             data = await resp.json()
             return data.get("signature")
